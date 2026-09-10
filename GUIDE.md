@@ -1,4 +1,4 @@
-# GUIDE — how this repo works
+# GUIDE — how this repo worksuu
 
 Five minutes here saves you hours later. This is the operating manual: what every file is,
 what you may edit, how the pieces connect, and where your own work goes.
