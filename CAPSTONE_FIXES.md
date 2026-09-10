@@ -220,3 +220,44 @@ real `HF_TOKEN` and have real results, regenerate this page (e.g. Jupyter's
 work/notebooks/capstone.ipynb --output docs/index.html`) and redeploy, so
 your live paper matches your repo instead of showing old/placeholder
 content.
+
+---
+
+## Section 5d: CV cell hung after logistic regression (nested parallelism)
+
+**Symptom:** In Section 5d, `logistic_regression` printed its result line
+(F1: 0.9385 | 5.1s), then `random_forest` sat silently forever — the user had
+to KeyboardInterrupt out of `cross_validate` (`joblib/parallel.py` in
+`_retrieve`). Every cell below 5d then never ran.
+
+**Root cause — nested parallelism:** `cross_validate(..., n_jobs=-1)` spawned a
+joblib worker per CV fold (5 processes), and *inside* each fold worker the
+RandomForest (`n_jobs=-1`) tried to spawn its own worker pool. Two competing
+pools on a 2-core runtime (Colab free tier / GitHub runner) = oversubscription
+and worker lock-up. LR survived because it is single-threaded; RF was the first
+model heavy enough to trigger the deadlock. The single silent `cross_validate`
+call also meant zero output while it hung, so it looked frozen rather than slow.
+
+**Fixes applied to the 5d cell:**
+1. **Parallelism at ONE level only** — fold-level `joblib.Parallel` capped at
+   `min(N_FOLDS, cpu_count // 2)` workers, with every model set to
+   `n_jobs=1` inside (RF changed from `n_jobs=-1` to `n_jobs=1` in `cv_models`).
+   Verified on synthetic data at full scale (116,113 rows, 44 clients): all 4
+   models × 5 folds complete in ~6 minutes single-machine with per-fold progress.
+2. **Per-fold progress logging** — `joblib verbose=5` streams fold completion;
+   a slow model can no longer look like a silent hang.
+3. **NaN-safe scorers** — `precision`/`f1`/`recall` via `make_scorer(...,
+   zero_division=0)`. A small client-grouped fold can have <10 positives or a
+   model can predict none; sklearn's default `nan` would poison mean/std.
+4. **Brier sign fix** — the fold helper returns the *negated* Brier score
+   (sklearn's `neg_brier_score` convention) because the aggregation cell does
+   `vals = -vals` to "undo negation"; previously that produced negative Brier
+   "losses" in the summary table (worse models looked better).
+5. **Same nesting fixed downstream** — `StackingClassifier(n_jobs=-1, cv=3)` in
+   Section 6 would have hit the identical deadlock after 5d was fixed; changed
+   to `n_jobs=1` with an explanatory comment.
+
+**Runtime expectation:** ~2 min on Colab's 2-core CPU runtime (vs. effectively
+infinite before). The `_cv_one_fold` helper clones the estimator per fold, fits,
+and scores all six metrics in one pass — no behavior change to `cv_results_all`
+or the 5d-bis plotting cell.
